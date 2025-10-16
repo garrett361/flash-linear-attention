@@ -85,7 +85,7 @@ class TestCPGDN(DTest):
         kn = F.normalize(k, p=2, dim=-1)
 
         # ---- reference forward (no CP) ----
-        _, o_ref, _, _ = chunk_gated_delta_rule_fwd(
+        _, o_ref, _, ht_ref = chunk_gated_delta_rule_fwd(
             q=qn,
             k=kn,
             v=v,
@@ -125,6 +125,9 @@ class TestCPGDN(DTest):
         # Check correctness
         o_cp_ref = self.cp_shard(o_ref)[self.rank]
         assert_close("o", o_cp_ref, o_cp, 0.002)
+        # Test that the final rank gets the expected final hidden state:
+        if self.rank == self.world_size - 1:
+            assert_close("ht", ht_ref, ht, 0.002)
 
     @pytest.mark.world_size([2, 4, 8])
     def test_bwd(self, world_size: int) -> None:
