@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
 from fla.models.gated_deltanet.modeling_gated_deltanet_cp import GatedDeltaNetForCausalLMCP
+from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetForCausalLM
 
 
 def setup_distributed(cp_size):
@@ -38,12 +39,15 @@ def setup_distributed(cp_size):
     return rank, device, cp_group
 
 
-def create_model_and_data(config, device):
+def create_model_and_data(config, device, use_cp=False):
     """Create model and dummy data"""
     torch.manual_seed(42)
-    
-    model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
-    
+
+    if use_cp:
+        model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
+    else:
+        model = GatedDeltaNetForCausalLM(config).to(device).to(torch.bfloat16)
+
     # Create dummy data
     batch_size = 2
     seq_len = 512
@@ -72,7 +76,7 @@ def test_single_gpu(save_ref=False):
         use_short_conv=False,  # Disable for simplicity
     )
     
-    model, input_ids, labels = create_model_and_data(config, device)
+    model, input_ids, labels = create_model_and_data(config, device, use_cp=False)
     
     print(f"\nConfig: hidden={config.hidden_size}, layers={config.num_hidden_layers}")
     print(f"Data: batch_size={input_ids.shape[0]}, seq_len={input_ids.shape[1]}")

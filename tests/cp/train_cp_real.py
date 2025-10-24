@@ -22,8 +22,16 @@ from transformers import AutoTokenizer
 # Import differentiable all_reduce
 from torch.distributed.nn import all_reduce
 
+import time
 from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
 from fla.models.gated_deltanet.modeling_gated_deltanet_cp import GatedDeltaNetForCausalLMCP
+import numpy as np
+import random
+
+
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
 
 
 def setup_distributed_cp(cp_size: int):
@@ -95,11 +103,15 @@ class RealisticTextDataset(Dataset):
         # Use idx as seed for consistent data across ranks
         torch.manual_seed(42 + idx)
         
-        # Simulate loading from storage
-        input_ids = torch.randint(0, self.vocab_size, (self.seq_len,), dtype=torch.long)
+        # # Simulate loading from storage
+        # input_ids = torch.randint(0, self.vocab_size, (self.seq_len,), dtype=torch.long)
         
-        # Create labels (shifted by 1 for next-token prediction)
-        labels = torch.cat([input_ids[1:], torch.tensor([self.vocab_size - 1])])
+        # # Create labels (shifted by 1 for next-token prediction)
+        # labels = torch.cat([input_ids[1:], torch.tensor([self.vocab_size - 1])])
+
+        seq = torch.arange(self.seq_len) % 100  # pattern repeats every 100 tokens
+        input_ids = seq.clone()
+        labels = (seq + 1) % 100  # next-token = next integer mod 100
         
         # Attention mask (all 1s for now, could have padding in real scenarios)
         attention_mask = torch.ones(self.seq_len, dtype=torch.long)
@@ -374,6 +386,9 @@ def main():
     total_loss = 0.0
     step = start_step
     optimizer.zero_grad()
+
+    torch.cuda.reset_peak_memory_stats()
+    start_time = time.time()
     
     while step < args.num_steps:
         for batch in dataloader:
@@ -410,7 +425,22 @@ def main():
                 
                 # Optimizer step
                 optimizer.step()
+
+                torch.cuda.synchronize()
+                step_time = time.time() - start_time
+                mem_alloc = torch.cuda.memory_allocated() / 1e9
+                mem_peak = torch.cuda.max_memory_allocated() / 1e9
+
+                if rank == 0:  # or always, if single GPU
+                    print(f"[Step {step+1}] Loss={loss.item():.4f} | "
+                        f"StepTime={step_time:.3f}s | "
+                        f"MemAlloc={mem_alloc:.2f}GB | "
+                        f"MemPeak={mem_peak:.2f}GB")
+
+                start_time = time.time()  # reset timer
+
                 optimizer.zero_grad()
+
                 
                 # Logging (rank 0 only)
                 if rank == 0 and (step + 1) % 10 == 0:
