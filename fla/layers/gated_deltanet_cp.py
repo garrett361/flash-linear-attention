@@ -107,6 +107,9 @@ class GatedDeltaNet(nn.Module):
         **kwargs
     ) -> GatedDeltaNet:
         super().__init__()
+        self.cp_rank = kwargs.get('cp_rank', 0)
+        self.cp_size = kwargs.get('cp_size', 1)
+        self.cp_group = kwargs.get('cp_group')
 
         self.mode = mode
         self.allow_neg_eigval = allow_neg_eigval
@@ -225,10 +228,6 @@ class GatedDeltaNet(nn.Module):
         mode = self.mode
 
         # Extract context parallel parameters from kwargs
-        cp_rank = kwargs.get('cp_rank', 0)
-        cp_size = kwargs.get('cp_size', 1)
-        cp_group = kwargs.get('cp_group', None)
-        cp_shard_start_idx = kwargs.get('cp_shard_start_idx', None)
 
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
@@ -254,11 +253,11 @@ class GatedDeltaNet(nn.Module):
                 # Default conv states are not used in chunk+CP path
                 conv_state_q = conv_state_k = conv_state_v = None
 
-                if h > 0 and cp_size > 1:
+                if h > 0 and self.cp_size > 1:
                     # Use helper to exchange halo and build extended inputs
                     q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend(
                         q_in, k_in, v_in, h,
-                        cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group,
+                        cp_rank=self.cp_rank, cp_size=self.cp_size, cp_group=self.cp_group,
                         cu_seqlens=cu_seqlens, cp_shard_start_idx=kwargs.get('cp_shard_start_idx')
                     )
 
@@ -329,7 +328,7 @@ class GatedDeltaNet(nn.Module):
                 q=q, k=k, v=v, g=g, beta=beta,
                 initial_state=recurrent_state, output_final_state=use_cache,
                 cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
-                cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group
+                cp_rank=self.cp_rank, cp_size=self.cp_size, cp_group=self.cp_group
             )
 
         elif mode == 'fused_recurrent':

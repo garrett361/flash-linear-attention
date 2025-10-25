@@ -4,6 +4,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from dtest import DTest
 
+from fla.layers.gated_deltanet_cp import GatedDeltaNet
+from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
 from fla.ops.gated_delta_rule.chunk import (
     chunk_gated_delta_rule_bwd,
     chunk_gated_delta_rule_fwd,
@@ -231,3 +233,71 @@ class TestCPGDN(DTest):
         assert_close("dv", self.cp_shard(dv_ref)[self.rank], dv_cp, 0.02)
         assert_close("db", self.cp_shard(db_ref)[self.rank], db_cp, 0.02)
         assert_close("dg", self.cp_shard(dg_ref)[self.rank], dg_cp, 0.02)
+
+    def test_fwd(self):
+        torch.manual_seed(42)
+        config = GatedDeltaNetConfig(
+            hidden_size=256,
+            num_hidden_layers=2,
+            num_heads=4,
+            head_dim=64,
+            vocab_size=1000,
+            attn_mode="chunk",
+            use_gate=True,
+            # use_short_conv=use_short_conv,
+            use_short_conv=False,
+            conv_size=4,
+            expand_v=1.0,
+        )
+
+        import torch.distributed as dist
+
+        world_group = dist.group.WORLD
+
+        model = GatedDeltaNet(
+            mode=config.attn_mode,
+            hidden_size=config.hidden_size,
+            expand_v=config.expand_v,
+            head_dim=config.head_dim,
+            num_heads=config.num_heads,
+            num_v_heads=config.num_v_heads,
+            use_gate=config.use_gate,
+            use_short_conv=config.use_short_conv,
+            allow_neg_eigval=config.allow_neg_eigval,
+            conv_size=config.conv_size,
+            norm_eps=config.norm_eps,
+            layer_idx=0,
+        ).to(device=self.device, dtype=torch.bfloat16)
+
+        model_cp = GatedDeltaNet(
+            mode=config.attn_mode,
+            hidden_size=config.hidden_size,
+            expand_v=config.expand_v,
+            head_dim=config.head_dim,
+            num_heads=config.num_heads,
+            num_v_heads=config.num_v_heads,
+            use_gate=config.use_gate,
+            use_short_conv=config.use_short_conv,
+            allow_neg_eigval=config.allow_neg_eigval,
+            conv_size=config.conv_size,
+            norm_eps=config.norm_eps,
+            layer_idx=0,
+            cp_rank=self.rank,
+            cp_size=self.world_size,
+            cp_group=world_group,
+        ).to(device=self.device, dtype=torch.bfloat16)
+        with torch.no_grad():
+            for p1, p2 in zip(model.parameters(), model_cp.parameters()):
+                p1.data.copy_(p2.data)
+
+            inputs = torch.randn(
+                1, self.T, 256, device=self.device, dtype=torch.bfloat16
+            )
+            out_ref, *_ = model(inputs)
+            out_ref_shard = self.cp_shard(out_ref)[self.rank]
+
+            inputs_cp = self.cp_shard(inputs)[self.rank]
+            out_cp, *_ = model_cp(inputs_cp)
+            out_cp
+
+        assert_close("out", out_ref_shard, out_cp, 0.02)
