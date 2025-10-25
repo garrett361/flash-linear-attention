@@ -234,7 +234,8 @@ class TestCPGDN(DTest):
         assert_close("db", self.cp_shard(db_ref)[self.rank], db_cp, 0.02)
         assert_close("dg", self.cp_shard(dg_ref)[self.rank], dg_cp, 0.02)
 
-    def test_fwd(self):
+    @pytest.mark.parametrize("use_short_conv", [False, True])
+    def test_fwd_layer(self, use_short_conv: bool):
         torch.manual_seed(42)
         config = GatedDeltaNetConfig(
             hidden_size=256,
@@ -244,8 +245,7 @@ class TestCPGDN(DTest):
             vocab_size=1000,
             attn_mode="chunk",
             use_gate=True,
-            # use_short_conv=use_short_conv,
-            use_short_conv=False,
+            use_short_conv=use_short_conv,
             conv_size=4,
             expand_v=1.0,
         )
