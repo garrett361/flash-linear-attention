@@ -13,59 +13,6 @@ from fla.modules.convolution import causal_conv1d_fwd, causal_conv1d_bwd
 from fla.utils import assert_close
 
 
-def _exchange_halo(rank, world_size, device, halo_to_send, halo_shape, dtype):
-    halo = None
-    recv_req = send_req = None
-
-    if rank > 0:
-        halo = torch.empty(*halo_shape, dtype=dtype, device=device)
-        recv_req = dist.irecv(halo, src=rank - 1)
-
-    if rank < world_size - 1 and halo_to_send is not None:
-        send_req = dist.isend(halo_to_send.contiguous(), dst=rank + 1)
-
-    if recv_req is not None:
-        recv_req.wait()
-    if send_req is not None:
-        send_req.wait()
-
-    return halo
-
-def _exchange_grad_halo(
-    rank: int,
-    world_size: int,
-    device: torch.device,
-    grad_to_send: torch.Tensor | None,
-    halo_shape,
-) -> torch.Tensor | None:
-    """
-    Exchange gradient halos in the *reverse* direction:
-    - grad flows from rank r -> r-1
-    - rank < world_size-1 receives from r+1
-    """
-    recv_req = None
-    send_req = None
-    halo_grad = None
-
-    # Post non-blocking receive first (if not last rank)
-    if rank < world_size - 1:
-        halo_grad = torch.empty(*halo_shape, dtype=torch.float32, device=device)
-        recv_req = dist.irecv(halo_grad, src=rank + 1)
-
-    # Post non-blocking send (if not rank 0)
-    if rank > 0 and grad_to_send is not None:
-        send_req = dist.isend(grad_to_send.contiguous(), dst=rank - 1)
-
-    # Wait for operations to complete
-    if recv_req is not None:
-        recv_req.wait()
-    if send_req is not None:
-        send_req.wait()
-
-    return halo_grad
-
-
-
 
 class TestCPGDN(DTest):
     B: int = 1
@@ -101,26 +48,39 @@ class TestCPGDN(DTest):
         ######## reference fwd ########
         ref_out, _ = causal_conv1d_fwd(x, weight, residual=None, bias=None)
 
-        ######## cp fwd ########
+        ######## cp fwd with overlapped communication ########
         halo_shape = (self.B, self.W - 1, self.D)
         
         x_shard = self.cp_shard(x)[self.rank]
         halo_to_send = x_shard[:, -(self.W - 1):, :]
 
-        # Perform local fwd convolution
-        out_shard, _ = causal_conv1d_fwd(x_shard, weight, residual=None, bias=None)
-        print(f"Rank {self.rank} - out_shard shape: {out_shard.shape}")
+        # Step 1: Initiate non-blocking halo exchange (communication starts)
+        halo = None
+        recv_req = send_req = None
         
-        # Exchange halos using non-blocking operations
-        halo = _exchange_halo(
-            self.rank, world_size, self.device,
-            halo_to_send, halo_shape, self.dtype
-        )        
-
-        print(f"Rank {self.rank} - received halo of shape: {halo.shape if halo is not None else None}")
-
-        # Correct boundary using halo
         if self.rank > 0:
+            halo = torch.empty(*halo_shape, dtype=self.dtype, device=self.device)
+            recv_req = dist.irecv(halo, src=self.rank - 1)
+        
+        if self.rank < world_size - 1 and halo_to_send is not None:
+            send_req = dist.isend(halo_to_send.contiguous(), dst=self.rank + 1)
+        
+        print(f"Rank {self.rank} - halo exchange initiated")
+
+        # Step 2: Perform local convolution on shard (overlapped with communication)
+        out_shard, _ = causal_conv1d_fwd(x_shard, weight, residual=None, bias=None)
+        print(f"Rank {self.rank} - out_shard computed (shape: {out_shard.shape})")
+        
+        # Step 3: Wait for halo exchange to complete
+        if recv_req is not None:
+            recv_req.wait()
+            print(f"Rank {self.rank} - received halo (shape: {halo.shape})")
+        if send_req is not None:
+            send_req.wait()
+            print(f"Rank {self.rank} - halo sent")
+
+        # Step 4: Perform boundary correction using received halo
+        if self.rank > 0 and halo is not None:
             print(f"Rank {self.rank} - correcting boundary")
             x_bndr = torch.cat([halo, x_shard[:, :self.W - 1, :]], dim=1)
             print(f"Rank {self.rank} - x_bndr shape: {x_bndr.shape}")
@@ -128,7 +88,7 @@ class TestCPGDN(DTest):
             print(f"Rank {self.rank} - halo_out shape: {halo_out.shape}")
             out_shard[:, :self.W - 1] = halo_out[:, self.W - 1:]
 
-        print(f"Rank {self.rank} - corrected out_shard shape: {out_shard.shape}")
+        print(f"Rank {self.rank} - final out_shard shape: {out_shard.shape}")
 
         ####### compare #####
         o_cp_ref = self.cp_shard(ref_out)[self.rank]
