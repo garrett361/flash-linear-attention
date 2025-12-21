@@ -97,9 +97,104 @@ class TestCPGDN(DTest):
 
 
 
+    @pytest.mark.world_size([2])
+    def test_bwd(self, world_size: int) -> None:
 
+        x = torch.randn(self.B, self.T, self.D, device=self.device, dtype=self.dtype)
+        weight = torch.randn(self.D, self.W, device=self.device, dtype=self.dtype)
 
+        # Reference
+        ref_out, _ = causal_conv1d_fwd(x, weight, residual=None, bias=None)
+        dy_global = torch.ones_like(ref_out)
+        ref_dx, ref_dw, _, _, _ = causal_conv1d_bwd(
+            x=x,
+            dy=dy_global,
+            dht=None,
+            weight=weight,
+            bias=None,
+            residual=None,
+            initial_state=None,
+            activation=None,
+            cu_seqlens=None,
+        )
 
+        # CP shards
+        x_shard = self.cp_shard(x)[self.rank]            # [B, Ts, D]
+        dy_shard = self.cp_shard(dy_global)[self.rank]   # [B, Ts, D]
+        Ts = x_shard.shape[1]
+        halo_shape = (self.B, self.W - 1, self.D)
 
+        # -------------------------
+        # CP Forward (unchanged)
+        # needs LEFT x-halo
+        # -------------------------
+        x_halo_left = None
+        recv_req_fwd = None
+        send_req_fwd = None
 
+        if self.rank > 0:
+            x_halo_left = torch.empty(*halo_shape, dtype=self.dtype, device=self.device)
+            recv_req_fwd = dist.irecv(x_halo_left, src=self.rank - 1)
 
+        if self.rank < world_size - 1:
+            x_to_send = x_shard[:, -(self.W - 1):, :].contiguous()
+            send_req_fwd = dist.isend(x_to_send, dst=self.rank + 1)
+
+        out_shard, _ = causal_conv1d_fwd(x_shard, weight, residual=None, bias=None)
+
+        if recv_req_fwd is not None:
+            recv_req_fwd.wait()
+            x_bndr = torch.cat([x_halo_left, x_shard[:, :self.W - 1, :]], dim=1)
+            halo_out, _ = causal_conv1d_fwd(x_bndr, weight, residual=None, bias=None)
+            out_shard[:, :self.W - 1] = halo_out[:, self.W - 1:]
+
+        if send_req_fwd is not None:
+            send_req_fwd.wait()
+
+        # -------------------------
+        # CP Backward (FIXED)
+        # needs RIGHT dy-halo only
+
+        # -------------------------
+        # 1) Exchange RIGHT dy halo
+        # -------------------------
+        dy_halo_right = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
+        recv_req = send_req = None
+
+        if self.rank < world_size - 1:
+            recv_req = dist.irecv(dy_halo_right, src=self.rank + 1)
+
+        if self.rank > 0:
+            send_req = dist.isend(dy_shard[:, :self.W - 1, :].contiguous(), dst=self.rank - 1)
+
+        if recv_req is not None: recv_req.wait()
+        if send_req is not None: send_req.wait()
+
+        # -------------------------
+        # 2) One bwd kernel call
+        #    - pad x on the RIGHT so fake positions don't create dw terms
+        #    - append right dy halo so last tokens get future dy
+        # -------------------------
+        x_pad = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
+        x_ext = torch.cat([x_shard, x_pad], dim=1)              # [B, Ts+W-1, D]
+        dy_ext = torch.cat([dy_shard, dy_halo_right], dim=1)    # [B, Ts+W-1, D]
+
+        dx_ext, dw_local, _, _, _ = causal_conv1d_bwd(
+            x=x_ext,
+            dy=dy_ext,
+            dht=None,
+            weight=weight,
+            bias=None,
+            residual=None,
+            initial_state=None,
+            activation=None,
+            cu_seqlens=None,
+        )
+
+        dx_shard = dx_ext[:, :Ts, :].contiguous()
+
+        # -------------------------
+        # 3) Reduce dw in fp32
+        # -------------------------
+        dw_local_fp32 = dw_local.float()
+        dist.all_reduce(dw_local_fp32, op=dist.ReduceOp.SUM)
