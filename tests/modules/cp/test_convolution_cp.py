@@ -154,7 +154,6 @@ class TestCPGDN(DTest):
         # -------------------------
         # CP Backward (FIXED)
         # needs RIGHT dy-halo only
-
         # -------------------------
         # 1) Exchange RIGHT dy halo
         # -------------------------
@@ -198,3 +197,11 @@ class TestCPGDN(DTest):
         # -------------------------
         dw_local_fp32 = dw_local.float()
         dist.all_reduce(dw_local_fp32, op=dist.ReduceOp.SUM)
+
+        # -------------------------
+        # 4) Extract reference shards for comparison
+        # -------------------------
+        ref_dx_shard = self.cp_shard(ref_dx)[self.rank]
+
+        assert_close("d_x", ref_dx_shard, dx_shard, 0.002)
+        assert_close("d_w", ref_dw, dw_local_fp32, 0.002)
