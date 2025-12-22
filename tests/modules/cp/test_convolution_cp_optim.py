@@ -154,9 +154,10 @@ class TestCPGDN(DTest):
         # -------------------------
         # CP Backward (FIXED)
         # needs RIGHT dy-halo only
-        # -------------------------
-        # 1) Exchange RIGHT dy halo
-        # -------------------------
+
+        # ----------------------------------------
+        # 1) Start the exchange of dy halo
+        # ----------------------------------------
         dy_halo_right = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
         recv_req = send_req = None
 
@@ -164,23 +165,16 @@ class TestCPGDN(DTest):
             recv_req = dist.irecv(dy_halo_right, src=self.rank + 1)
 
         if self.rank > 0:
-            send_req = dist.isend(dy_shard[:, :self.W - 1, :].contiguous(), dst=self.rank - 1)
+            send_req = dist.isend(dy_shard[:, :self.W - 1, :].contiguous(), dst=self.rank - 1) # do we need contiguous ?
 
-        if recv_req is not None: recv_req.wait()
-        if send_req is not None: send_req.wait()
 
-        # -------------------------
-        # 2) One bwd kernel call
-        #    - pad x on the RIGHT so fake positions don't create dw terms
-        #    - append right dy halo so last tokens get future dy
-        # -------------------------
-        x_pad = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
-        x_ext = torch.cat([x_shard, x_pad], dim=1)              # [B, Ts+W-1, D]
-        dy_ext = torch.cat([dy_shard, dy_halo_right], dim=1)    # [B, Ts+W-1, D]
+        # ------------------------------------------------------------------
+        # 2) Backward Kernel on Local shard while communication happening
+        # -------------------------------------------------------------------
 
-        dx_ext, dw_local, _, _, _ = causal_conv1d_bwd(
-            x=x_ext,
-            dy=dy_ext,
+        dx_shard, dw_shard, _, _, _ = causal_conv1d_bwd(
+            x=x_shard,
+            dy=dy_shard,
             dht=None,
             weight=weight,
             bias=None,
@@ -190,20 +184,75 @@ class TestCPGDN(DTest):
             cu_seqlens=None,
         )
 
-        dx_shard = dx_ext[:, :Ts, :].contiguous()
+        # --------------------
+        # 3) Collect Halo
+        # --------------------     
+
+        if recv_req is not None: recv_req.wait()
+        if send_req is not None: send_req.wait()
+
+
+        # -----------------------------------------
+        # 4) Backward kernel on boundary tokens with RIGHT x zero
+        # ------------------------------------------    
+        
+        print('#############', x_shard.size())
+
+        x_pad = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
+        x_bndr = torch.cat([x_shard[:, -(self.W-1):, :], x_pad], dim=1) # [B, 2*(W-1), D]
+        dy_bdnr = torch.cat([dy_shard[:, -(self.W-1):, :], dy_halo_right], dim=1)  # [B, 2*(W-1), D]
+
+        dx_bndr, dw_bndr, _, _, _ = causal_conv1d_bwd(
+            x=x_bndr,
+            dy=dy_bdnr,
+            dht=None,
+            weight=weight,
+            bias=None,
+            residual=None,
+            initial_state=None,
+            activation=None,
+            cu_seqlens=None,
+        )
+
+        # ---------------------------------
+        # 4) Update dx_shard and dw_shard
+        # ---------------------------------
+
+        dx_shard[:, -(self.W-1):, :] = dx_bndr[:, :self.W-1, :]
+        # dw_shard += dw_bndr # Can have duplicate interactions of dy and x in last W-1 positions of current shard
+
+        print("dw shard size: ", dw_shard.shape)
+
+        # -------------------------------------------------------------------
+        # 4) Backward kernel on boundary tokens with LEFT dy zero and RIGHT x zero
+        # ----------------------------------------------------------------------
+
+        dy_pad = torch.zeros(*halo_shape, dtype=self.dtype, device=self.device)
+        dy_bdnr = torch.cat([dy_pad, dy_halo_right], dim=1)  # [B, 2*(W-1), D]
+
+
+        _, dw_crt, _, _, _ = causal_conv1d_bwd(
+            x=x_bndr,
+            dy=dy_bdnr,
+            dht=None,
+            weight=weight,
+            bias=None,
+            residual=None,
+            initial_state=None,
+            activation=None,
+            cu_seqlens=None,
+        )
+
+        dw_shard += dw_crt
 
         # -------------------------
         # 3) Reduce dw in fp32
         # -------------------------
-        dw_local_fp32 = dw_local.float()
+        dw_local_fp32 = dw_shard.float()
         dist.all_reduce(dw_local_fp32, op=dist.ReduceOp.SUM)
 
-        # -------------------------
-        # 4) Extract reference shards for comparison
-        # -------------------------
+        ####### compare #####
         ref_dx_shard = self.cp_shard(ref_dx)[self.rank]
 
         assert_close("d_x", ref_dx_shard, dx_shard, 0.005)
         assert_close("d_w", ref_dw, dw_local_fp32, 0.005)
-
-
