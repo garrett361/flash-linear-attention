@@ -40,7 +40,7 @@ class TestCPGDN(DTest):
         return torch.cat(tensor_list, dim=shard_dim)
 
 
-    @pytest.mark.world_size([2])
+    @pytest.mark.world_size([2, 4, 8])
     def test_fwd(self, world_size: int) -> None:
         x = torch.randn(self.B, self.T, self.D, device=self.device, dtype=self.dtype)
         weight = torch.randn(self.D, self.W, device=self.device, dtype=self.dtype)
@@ -97,7 +97,7 @@ class TestCPGDN(DTest):
 
 
 
-    @pytest.mark.world_size([2])
+    @pytest.mark.world_size([2, 4, 8])
     def test_bwd(self, world_size: int) -> None:
 
         x = torch.randn(self.B, self.T, self.D, device=self.device, dtype=self.dtype)
@@ -254,5 +254,5 @@ class TestCPGDN(DTest):
         ####### compare #####
         ref_dx_shard = self.cp_shard(ref_dx)[self.rank]
 
-        assert_close("d_x", ref_dx_shard, dx_shard, 0.005)
-        assert_close("d_w", ref_dw, dw_local_fp32, 0.005)
+        assert_close("d_x", ref_dx_shard, dx_shard, 0.003)
+        assert_close("d_w", ref_dw, dw_local_fp32, 0.003)

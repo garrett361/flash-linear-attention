@@ -203,7 +203,6 @@ class TestCPGDN(DTest):
         # -------------------------
         ref_dx_shard = self.cp_shard(ref_dx)[self.rank]
 
-        assert_close("d_x", ref_dx_shard, dx_shard, 0.005)
-        assert_close("d_w", ref_dw, dw_local_fp32, 0.005)
-
+        assert_close("d_x", ref_dx_shard, dx_shard, 0.003)
+        assert_close("d_w", ref_dw, dw_local_fp32, 0.003)
 
