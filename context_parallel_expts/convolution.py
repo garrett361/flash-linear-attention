@@ -26,7 +26,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         # cp_group = None, # Multi-node
     ):
 
-        assert bias is None and residual is None and initial_state is None
+        # assert bias is None and residual is None and initial_state is None
         assert activation is None and cu_seqlens is None
 
         ctx.activation = activation
@@ -127,7 +127,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         cp_rank, cp_size = ctx.cp_rank, ctx.cp_size
 
-        assert bias is None and residual is None and initial_state is None
+        # assert bias is None and residual is None and initial_state is None
 
         B, Ts, D = x.shape
         W = weight.size(1)
@@ -163,7 +163,7 @@ class CausalConv1dFunction(torch.autograd.Function):
 
             # Backward Kernel on Local shard while communication happening
 
-            dx, dw, _, _, _ = causal_conv1d_bwd(
+            dx, dw, db, _, _ = causal_conv1d_bwd(
                 x=x,
                 dy=dy,
                 dht=dht,
@@ -223,6 +223,8 @@ class CausalConv1dFunction(torch.autograd.Function):
             # Reduce dw across all ranks
             dist.all_reduce(dw, op=dist.ReduceOp.SUM)
 
+            dist.all_reduce(db, op=dist.ReduceOp.SUM)
+
         # return dx, dw, db, dr, dh0, None, None, None
 
-        return dx, dw, None, None, None, None, None, None, None, None 
+        return dx, dw, db, None, None, None, None, None, None, None 

@@ -17,18 +17,19 @@ def init_dist():
 # -----------------------------
 # Helper: run reference
 # -----------------------------
-def run_reference(x, weight):
+def run_reference(x, weight, bias, activation):
     x = x.detach().clone().requires_grad_(True)
     weight = weight.detach().clone().requires_grad_(True)
+    bias = bias.detach().clone().requires_grad_(True)
 
     y_ref, _ = causal_conv1d(
         x=x,
         weight=weight,
-        bias=None,
+        bias=bias,
         residual=None,
         initial_state=None,
         output_final_state=False,
-        activation=None,
+        activation=activation,
         backend="triton",
         cu_seqlens=None,
     )
@@ -36,7 +37,7 @@ def run_reference(x, weight):
     dy = torch.ones_like(y_ref)
     y_ref.backward(dy)
 
-    return y_ref.detach(), x.grad.detach(), weight.grad.detach()
+    return y_ref.detach(), x.grad.detach(), weight.grad.detach(), bias.grad.detach()
 
 
 
@@ -44,18 +45,19 @@ def run_reference(x, weight):
 # -----------------------------
 # Helper: run CP version
 # -----------------------------
-def run_cp(x, weight, cp_rank, cp_size):
+def run_cp(x, weight, bias, activation, cp_rank, cp_size):
     x = x.detach().clone().requires_grad_(True)
     weight = weight.detach().clone().requires_grad_(True)
+    bias = bias.detach().clone().requires_grad_(True)
 
     y_cp, _ = CausalConv1dFunction.apply(
         x,
         weight,
-        None,   # bias
+        bias,   # bias
         None,   # residual
         None,   # initial_state
         False,  # output_final_state
-        None,   # activation
+        activation,   # activation
         None,   # cu_seqlens
         cp_rank,
         cp_size,
@@ -64,7 +66,7 @@ def run_cp(x, weight, cp_rank, cp_size):
     dy = torch.ones_like(y_cp)
     y_cp.backward(dy)
 
-    return y_cp.detach(), x.grad.detach(), weight.grad.detach()
+    return y_cp.detach(), x.grad.detach(), weight.grad.detach(), bias.grad.detach()
 
 
 # -----------------------------
@@ -89,6 +91,7 @@ def main():
     # ---- inputs ----
     x_global = torch.randn(B, T, D, device=device, dtype=dtype)
     weight = torch.randn(D, W, device=device, dtype=dtype)
+    bias = torch.randn(D, device=device, dtype=dtype)
 
     # ---- shard x ----
     x_shards = torch.chunk(x_global, world, dim=1)
@@ -96,10 +99,10 @@ def main():
 
     # ---- reference (only rank 0 runs it) ----
     if rank == 0:
-        y_ref, dx_ref, dw_ref = run_reference(x_global, weight)
+        y_ref, dx_ref, dw_ref, db_ref = run_reference(x_global, weight, bias, None)
 
     # ---- CP run ----
-    y_cp, dx_cp, dw_cp = run_cp(x, weight, rank, world)
+    y_cp, dx_cp, dw_cp, db_cp = run_cp(x, weight, bias, None, rank, world)
 
     # ---- gather CP outputs for comparison ----
     y_cp_full = [torch.empty_like(y_cp) for _ in range(world)]
@@ -124,6 +127,7 @@ def main():
         check("y", y_cp_full, y_ref)
         check("dx", dx_cp_full, dx_ref)
         check("dw", dw_cp, dw_ref)
+        check("db", db_cp, db_ref)
 
 
         # print("To understand the magnitude of errors: ")
