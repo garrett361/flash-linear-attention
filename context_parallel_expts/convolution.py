@@ -110,7 +110,7 @@ class CausalConv1dFunction(torch.autograd.Function):
                     residual=residual,
                     # initial_state=initial_state,
                     # output_final_state=output_final_state,
-                    # activation=activation,
+                    activation=activation,
                     # cu_seqlens=cu_seqlens,
                 )
 
@@ -194,7 +194,7 @@ class CausalConv1dFunction(torch.autograd.Function):
                 bias=None,
                 residual=None,
                 initial_state=None,
-                activation=None,
+                activation=ctx.activation,
                 cu_seqlens=None,
             )
 
@@ -214,7 +214,7 @@ class CausalConv1dFunction(torch.autograd.Function):
                 bias=None,
                 residual=None,
                 initial_state=None,
-                activation=None,
+                activation=ctx.activation,
                 cu_seqlens=None,
             )
 
